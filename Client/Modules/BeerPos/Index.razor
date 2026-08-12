@@ -1,0 +1,328 @@
+@using Microsoft.AspNetCore.Components.Forms
+@using Yosh.uwa.Models
+@using Yosh.uwa.Services
+@namespace Yosh.uwa.BeerPos
+@inherits ModuleBase
+@inject IBeerPosService PosService
+@inject IJSRuntime JS
+
+<div class="beer-pos-shell">
+    @if (_loading)
+    {
+        <div class="pos-loading"><i class="fa-solid fa-circle-notch fa-spin"></i><strong>Opening register…</strong></div>
+    }
+    else if (_catalog?.Store == null)
+    {
+        <div class="pos-error"><i class="fa-solid fa-triangle-exclamation"></i><strong>POS unavailable</strong><span>@_error</span><button class="btn btn-light" @onclick="Reload">Try again</button></div>
+    }
+    else
+    {
+        <header class="pos-topbar">
+            <div>
+                <div class="pos-eyebrow"><span class="status-dot @(Store.IsOpen ? null : "closed")"></span> @(Store.IsOpen ? "Register open" : "Register closed")</div>
+                <h2>@Store.Name <span>POS</span></h2>
+            </div>
+            <div class="shift-meta">
+                <div><small>NEXT ORDER</small><strong>#@Store.NextOrderNumber</strong></div>
+                <div><small>TENANT SITE</small><strong>@PageState.Site.Name</strong></div>
+                @if (_catalog.CanManage)
+                {
+                    <button type="button" class="icon-button manage-button" title="Manage this POS" aria-label="Manage POS" @onclick="ToggleManage">@(_manage ? "Close manager" : "Manage POS")</button>
+                }
+            </div>
+        </header>
+
+        @if (!string.IsNullOrWhiteSpace(_notice))
+        {
+            <div class="pos-notice"><span class="notice-mark">✓</span><span>@_notice</span><button type="button" aria-label="Dismiss" @onclick="(() => _notice = null)">Close</button></div>
+        }
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <div class="pos-notice error"><span class="notice-mark">!</span><span>@_error</span><button type="button" aria-label="Dismiss" @onclick="(() => _error = null)">Close</button></div>
+        }
+
+        @if (_lastReceipt != null)
+        {
+            <div class="receipt-overlay" role="dialog" aria-label="Receipt">
+                <div class="receipt-paper" id="beer-pos-receipt">
+                    <div class="receipt-brand"><strong>@_lastReceipt.StoreName</strong><span>SALES RECEIPT</span></div>
+                    <div class="receipt-meta"><span>Order #@_lastReceipt.OrderNumber</span><span>@_lastReceipt.CreatedOn.ToLocalTime().ToString("g")</span><span>Payment</span><span>@_lastReceipt.PaymentMethod</span></div>
+                    @if (_lastReceipt.Message == "Cancelled") { <div class="receipt-cancelled">CANCELLED</div> }
+                    <div class="receipt-lines">
+                        @foreach (var line in _lastReceipt.Lines)
+                        {
+                            <div><span>@line.Quantity × @line.ProductName<small>@ReceiptMoney(line.UnitPriceCents) each</small></span><strong>@ReceiptMoney(line.LineTotalCents)</strong></div>
+                        }
+                    </div>
+                    <div class="receipt-totals"><div><span>Subtotal</span><strong>@ReceiptMoney(_lastReceipt.SubtotalCents)</strong></div><div><span>Tax</span><strong>@ReceiptMoney(_lastReceipt.TaxCents)</strong></div><div class="receipt-grand"><span>Total</span><strong>@ReceiptMoney(_lastReceipt.TotalCents)</strong></div></div>
+                    <p>@_lastReceipt.ReceiptFooter</p>
+                    <div class="receipt-actions"><button type="button" class="btn btn-dark" @onclick="PrintReceipt">Print receipt</button><button type="button" class="btn btn-outline-secondary" @onclick="(() => _lastReceipt = null)">Close receipt</button></div>
+                </div>
+            </div>
+        }
+
+        @if (_manage)
+        {
+            <section class="pos-admin" aria-label="POS administration">
+                <div class="admin-heading"><div><span class="pos-eyebrow">Tenant-isolated workspace</span><h3>Store, sales & catalogue</h3><p>This configuration belongs only to this Oqtane site and module instance.</p></div><button class="btn btn-dark" @onclick="ToggleManage">Back to register</button></div>
+                @if (_catalog.IsMasterAdmin)
+                {
+                    <div class="admin-card master-overview">
+                        <div class="card-title"><span class="section-mark">HQ</span><div><h4>Master POS overview</h4><p>All POS stores created across sites in this Oqtane tenant.</p></div></div>
+                        <div class="master-store-grid">
+                            @foreach (var summary in _catalog.MasterStores)
+                            {
+                                <div class="master-store">
+                                    <div><span class="status-dot @(summary.IsOpen ? null : "closed")"></span><strong>@summary.StoreName</strong><small>@summary.SiteName · site @summary.SiteId · module @summary.ModuleId</small></div>
+                                    <dl><div><dt>Products</dt><dd>@summary.ProductCount</dd></div><div><dt>Paid sales</dt><dd>@summary.PaidOrders</dd></div><div><dt>Cancelled</dt><dd>@summary.CancelledOrders</dd></div><div><dt>Revenue</dt><dd>@StoreMoney(summary)</dd></div><div><dt>Low stock</dt><dd>@summary.LowStockProducts</dd></div></dl>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+                <div class="admin-stats">
+                    <div><span>Products</span><strong>@_catalog.Products.Count</strong></div>
+                    <div><span>Today's orders</span><strong>@_catalog.Analytics.TodayOrders</strong></div>
+                    <div><span>Today's revenue</span><strong>@Money(_catalog.Analytics.TodayRevenueCents)</strong></div>
+                    <div><span>Average sale</span><strong>@Money(_catalog.Analytics.AverageOrderCents)</strong></div>
+                    <div class="@( _catalog.Analytics.LowStockProducts > 0 ? "warning" : null)"><span>Low stock</span><strong>@_catalog.Analytics.LowStockProducts</strong></div>
+                </div>
+
+                <div class="analytics-grid">
+                    <div class="admin-card analytics-card">
+                        <div class="card-title"><span class="section-mark">$</span><div><h4>Sales overview</h4><p>@_catalog.Analytics.TotalOrders completed orders · @Money(_catalog.Analytics.TotalRevenueCents) lifetime revenue</p></div></div>
+                        <div class="payment-breakdown">
+                            @if (_catalog.Analytics.PaymentMethods.Count == 0) { <p class="muted-copy">No sales recorded yet.</p> }
+                            @foreach (var metric in _catalog.Analytics.PaymentMethods) { <div><span>@metric.Label<small>@metric.Count order@(metric.Count == 1 ? "" : "s")</small></span><strong>@Money(metric.AmountCents)</strong></div> }
+                        </div>
+                    </div>
+                    <div class="admin-card analytics-card">
+                        <div class="card-title"><span class="section-mark">TOP</span><div><h4>Best sellers</h4><p>Ranked by units sold.</p></div></div>
+                        <div class="top-products">
+                            @if (_catalog.Analytics.TopProducts.Count == 0) { <p class="muted-copy">Products appear after the first sale.</p> }
+                            @foreach (var product in _catalog.Analytics.TopProducts) { <div><span>@product.ProductName<small>@product.Quantity sold</small></span><strong>@Money(product.RevenueCents)</strong></div> }
+                        </div>
+                    </div>
+                    <div class="admin-card analytics-card recent-sales">
+                        <div class="card-title sales-title"><span class="section-mark">#</span><div><h4>Sales ledger</h4><p>View receipts, cancel sales, or download the ledger.</p></div><a class="btn btn-dark" href="@SalesExportUrl" download>Download CSV</a></div>
+                        <div class="sales-filters"><input class="form-control" placeholder="Search order or customer" @bind="_salesSearch" @bind:event="oninput" /><select class="form-select" @bind="_salesStatus"><option>All</option><option>Paid</option><option>Cancelled</option></select></div>
+                        @if (FilteredSales.Count == 0) { <p class="muted-copy">No matching transactions.</p> }
+                        @foreach (var order in FilteredSales)
+                        {
+                            <div class="sale-row detailed">
+                                <strong>#@order.OrderNumber</strong><span>@order.CreatedOn.ToLocalTime().ToString("g")</span><span>@(string.IsNullOrWhiteSpace(order.CustomerName) ? "Walk-in" : order.CustomerName)</span><span>@order.PaymentMethod</span><span class="sale-status @order.Status.ToLowerInvariant()">@order.Status</span><b>@Money(order.TotalCents)</b>
+                                <div class="sale-actions"><button class="btn btn-outline-secondary btn-sm" @onclick="(() => ViewSale(order))">View</button>@if (order.Status == "Paid") { <button class="btn btn-outline-danger btn-sm" @onclick="(() => _cancelOrder = order)">Cancel</button> }</div>
+                            </div>
+                            @if (_cancelOrder?.PosOrderId == order.PosOrderId)
+                            {
+                                <div class="cancel-confirm"><span>Cancel order #@order.OrderNumber and restore tracked stock?</span><button class="btn btn-danger btn-sm" @onclick="(() => CancelSale(order))">Confirm cancel</button><button class="btn btn-outline-secondary btn-sm" @onclick="(() => _cancelOrder = null)">Keep sale</button></div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                <div class="admin-grid">
+                    <div class="admin-card">
+                        <div class="card-title"><span class="section-mark">ST</span><div><h4>Store settings</h4><p>Brand the register and control tax.</p></div></div>
+                        <label>Store name<input class="form-control" @bind="Store.Name" /></label>
+                        <div class="form-pair"><label>Currency symbol<input class="form-control" maxlength="5" @bind="Store.CurrencySymbol" /></label><label>Tax rate (%)<input class="form-control" type="number" min="0" max="100" step="0.01" @bind="_taxPercent" /></label></div>
+                        <label>Receipt footer<textarea class="form-control" rows="2" @bind="Store.ReceiptFooter"></textarea></label>
+                        <label class="switch-row"><input type="checkbox" @bind="Store.IsOpen" /><span>Register is open for sales</span></label>
+                        <button class="btn btn-success" disabled="@_saving" @onclick="SaveStore"><i class="fa-solid fa-floppy-disk"></i> Save store</button>
+                    </div>
+
+                    <div class="admin-card">
+                        <div class="card-title"><span class="section-mark">CAT</span><div><h4>Categories</h4><p>Organise the touch catalogue.</p></div></div>
+                        <div class="inline-create"><input class="form-control" placeholder="New category" @bind="_newCategory" /><button class="btn btn-dark" @onclick="AddCategory">Add</button></div>
+                        <div class="category-manager">
+                            @foreach (var category in _catalog.Categories)
+                            {
+                                <span>@category.Name</span>
+                            }
+                        </div>
+                    </div>
+                </div>
+
+                <div class="admin-card product-editor">
+                    <div class="card-title"><span class="section-mark">PRD</span><div><h4>@(_productDraft.PosProductId == 0 ? "Add catalogue item" : "Edit catalogue item")</h4><p>Upload a product image, price it, and set starting stock.</p></div></div>
+                    <div class="product-form">
+                        <label>Product name<input class="form-control" @bind="_productDraft.Name" @bind:event="oninput" /></label>
+                        <label>Category<select class="form-select" @bind="_productDraft.PosCategoryId">@foreach (var category in _catalog.Categories) { <option value="@category.PosCategoryId">@category.Name</option> }</select></label>
+                        <label>Price<input class="form-control" type="number" min="0" step="0.01" @bind="_productPrice" @bind:event="oninput" /></label>
+                        <label>Brewery / brand<input class="form-control" @bind="_productDraft.Brewery" @bind:event="oninput" /></label>
+                        <label>Style<input class="form-control" @bind="_productDraft.Style" @bind:event="oninput" /></label>
+                        <label>ABV<input class="form-control" placeholder="5.0%" @bind="_productDraft.Abv" @bind:event="oninput" /></label>
+                        <label>Format<input class="form-control" placeholder="Pint, can, bottle" @bind="_productDraft.Format" @bind:event="oninput" /></label>
+                        <label>SKU / barcode<input class="form-control" @bind="_productDraft.Sku" @bind:event="oninput" /></label>
+                        <label>Stock label<input class="form-control" placeholder="Tap 01 / Cold" @bind="_productDraft.StockLabel" @bind:event="oninput" /></label>
+                        <label>Stock quantity<input class="form-control" type="number" min="0" step="1" @bind="_productDraft.StockQuantity" @bind:event="oninput" /></label>
+                        <label>Low-stock alert<input class="form-control" type="number" min="0" step="1" @bind="_productDraft.LowStockThreshold" @bind:event="oninput" /></label>
+                        <label class="switch-row inventory-switch"><input type="checkbox" @bind="_productDraft.TrackInventory" /><span>Track inventory</span></label>
+                        <label>Card colour<select class="form-select" @bind="_productDraft.Color"><option>gold</option><option>orange</option><option>blue</option><option>cream</option><option>charcoal</option><option>lime</option><option>aqua</option><option>red</option><option>green</option></select></label>
+                        <label class="photo-field">Product photo<InputFile class="form-control" accept="image/png,image/jpeg,image/webp" OnChange="ReadPhoto" /><small>JPEG, PNG or WebP, up to 600 KB.</small></label>
+                        <label class="wide">Description<textarea class="form-control" rows="2" @bind="_productDraft.Description"></textarea></label>
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(_productDraft.ImageDataUrl)) { <img class="photo-preview" src="@_productDraft.ImageDataUrl" alt="Product preview" /> }
+                    <div class="editor-actions"><button class="btn btn-success" disabled="@_saving" @onclick="SaveProduct"><i class="fa-solid fa-floppy-disk"></i> @(_productDraft.PosProductId == 0 ? "Add product" : "Save changes")</button>@if (_productDraft.PosProductId != 0) { <button class="btn btn-outline-secondary" @onclick="ResetProduct">Cancel edit</button> }</div>
+                </div>
+
+                <div class="admin-card">
+                    <div class="card-title"><span class="section-mark">INV</span><div><h4>Catalogue & inventory</h4><p>@_catalog.Products.Count active products. Edit a product to adjust stock.</p></div></div>
+                    <div class="catalog-table">
+                        @foreach (var product in _catalog.Products)
+                        {
+                            <div class="catalog-row">
+                                <span class="mini-art @product.Color">@if (!string.IsNullOrWhiteSpace(product.ImageDataUrl)) { <img src="@product.ImageDataUrl" alt="" /> } else { @Initials(product.Name) }</span>
+                                <div><strong>@product.Name</strong><small>@CategoryName(product.PosCategoryId) · @product.Brewery</small></div><b>@Money(product.PriceCents)</b>
+                                <span class="stock-badge @(StockClass(product))">@(product.TrackInventory ? $"{product.StockQuantity} in stock" : "Not tracked")</span>
+                                <button class="btn btn-outline-secondary btn-sm action-label" aria-label="Edit @product.Name" @onclick="(() => EditProduct(product))">Edit</button>
+                                <button class="btn btn-outline-danger btn-sm action-label" aria-label="Delete @product.Name" @onclick="(() => DeleteProduct(product))">Delete</button>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </section>
+        }
+        else
+        {
+            <div class="pos-workspace">
+                <main class="catalog-panel">
+                    <div class="catalog-tools">
+                        <label class="pos-search"><i class="fa-solid fa-magnifying-glass"></i><input aria-label="Search products" placeholder="Search beer, brewery, style or SKU" @bind="_search" @bind:event="oninput" />@if (!string.IsNullOrWhiteSpace(_search)) { <button type="button" title="Clear search" @onclick="(() => _search = string.Empty)"><i class="fa-solid fa-xmark"></i></button> }</label>
+                        <button type="button" class="scan-button" @onclick="(() => _scanMode = !_scanMode)"><i class="fa-solid fa-barcode"></i><span>Scan</span></button>
+                    </div>
+                    @if (_scanMode)
+                    {
+                        <div class="scan-strip"><i class="fa-solid fa-barcode"></i><input class="form-control" aria-label="Barcode" placeholder="Scan or enter SKU, then press Enter" @bind="_barcode" @onkeydown="ScanKey" /><button class="btn btn-dark" @onclick="FindBarcode">Add</button></div>
+                    }
+                    <div class="category-strip" aria-label="Product categories"><button class="@(_categoryId == 0 ? "active" : null)" @onclick="(() => _categoryId = 0)">All</button>@foreach (var category in _catalog.Categories) { <button class="@(_categoryId == category.PosCategoryId ? "active" : null)" @onclick="(() => _categoryId = category.PosCategoryId)">@category.Name</button> }</div>
+                    <div class="catalog-heading"><div><h3>@(_categoryId == 0 ? "On tap & cold" : CategoryName(_categoryId))</h3><p>@FilteredProducts.Count product@(FilteredProducts.Count == 1 ? string.Empty : "s") available</p></div><span class="view-label">Grid view</span></div>
+                    @if (FilteredProducts.Count == 0) { <div class="empty-products"><i class="fa-solid fa-magnifying-glass"></i><h4>No products found</h4><p>Try another search or category.</p></div> }
+                    else
+                    {
+                        <div class="product-grid">
+                            @foreach (var product in FilteredProducts)
+                            {
+                                <button type="button" class="product-card" disabled="@(!Store.IsOpen || SoldOut(product))" @onclick="(() => Add(product))">
+                                    <span class="beer-art @product.Color">@if (!string.IsNullOrWhiteSpace(product.ImageDataUrl)) { <img src="@product.ImageDataUrl" alt="@product.Name" /> } else { <span>@Initials(product.Name)</span> }<small>@product.Format</small></span>
+                                    <span class="product-copy"><span class="product-style">@product.Style @(!string.IsNullOrWhiteSpace(product.Abv) ? "· " + product.Abv : string.Empty)</span><strong>@product.Name</strong><span class="product-brewery">@product.Brewery</span><span class="product-foot"><b>@Money(product.PriceCents)</b><em>@(SoldOut(product) ? "Sold out" : product.TrackInventory ? $"{product.StockQuantity} left" : product.StockLabel)</em></span></span><span class="quick-add">+</span>
+                                </button>
+                            }
+                        </div>
+                    }
+                </main>
+
+                <aside class="order-panel">
+                    <div class="order-head"><div><span>Current order</span><h3>@CartCount item@(CartCount == 1 ? string.Empty : "s")</h3></div><button type="button" class="clear-order" disabled="@(CartCount == 0)" @onclick="ClearCart">Clear</button></div>
+                    @if (_customerOpen) { <div class="customer-entry"><input class="form-control" placeholder="Customer name" @bind="_customerName" /><button class="btn btn-light" aria-label="Close customer" @onclick="(() => _customerOpen = false)"><i class="fa-solid fa-xmark"></i></button></div> }
+                    else { <button type="button" class="customer-row" @onclick="(() => _customerOpen = true)"><span class="customer-icon"><i class="fa-solid fa-user-plus"></i></span><span><strong>@(string.IsNullOrWhiteSpace(_customerName) ? "Add customer" : _customerName)</strong><small>Receipt name</small></span><i class="fa-solid fa-chevron-right"></i></button> }
+                    <div class="cart-lines">
+                        @if (CartCount == 0) { <div class="empty-cart"><span><i class="fa-solid fa-beer-mug-empty"></i></span><h4>Ready for a round</h4><p>Tap any product to add it to this order.</p></div> }
+                        else { @foreach (var line in CartLines) { <div class="cart-line"><span class="line-art @line.Product.Color">@Initials(line.Product.Name)</span><div class="line-copy"><strong>@line.Product.Name</strong><small>@line.Product.Format · @Money(line.Product.PriceCents)</small></div><div class="quantity-control"><button aria-label="Decrease @line.Product.Name" @onclick="(() => Decrease(line.Product))">−</button><b>@line.Quantity</b><button aria-label="Increase @line.Product.Name" @onclick="(() => Add(line.Product))">+</button></div><strong class="line-total">@Money(line.TotalCents)</strong></div> } }
+                    </div>
+                    <div class="order-summary"><div><span>Subtotal</span><strong>@Money(SubtotalCents)</strong></div><div><span>Tax (@TaxPercentLabel)</span><strong>@Money(TaxCents)</strong></div><div class="grand-total"><span>Total</span><strong>@Money(TotalCents)</strong></div></div>
+                    <div class="payment-methods">@foreach (var method in PaymentMethods) { <button class="@(_paymentMethod == method.Name ? "active" : null)" @onclick="(() => _paymentMethod = method.Name)"><i class="@method.Icon"></i><span>@method.Name</span></button> }</div>
+                    <button class="pay-button" disabled="@(CartCount == 0 || _checkingOut || !Store.IsOpen)" @onclick="CompleteOrder"><span>@(_checkingOut ? "Processing…" : $"Charge {Money(TotalCents)}")</span><i class="fa-solid fa-arrow-right"></i></button>
+                    <div class="shortcut-hint"><i class="fa-solid fa-shield-halved"></i> Server-validated checkout <span></span><i class="fa-solid fa-cloud"></i> Tenant data</div>
+                </aside>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    public override string Title => "Beer POS";
+    public override List<Resource> Resources => new() { new Stylesheet(ModulePath() + "Module.css") };
+    private PosCatalog _catalog;
+    private PosReceipt _lastReceipt;
+    private PosOrder _cancelOrder;
+    private PosStore Store => _catalog?.Store;
+    private bool _loading = true, _saving, _checkingOut, _manage, _scanMode, _customerOpen;
+    private string _search = string.Empty, _barcode = string.Empty, _paymentMethod = "Card", _notice, _error, _newCategory = string.Empty, _customerName = string.Empty, _salesSearch = string.Empty, _salesStatus = "All";
+    private int _categoryId;
+    private decimal _taxPercent = 8.5m, _productPrice;
+    private PosProduct _productDraft = new() { IsActive = true, Format = "Pint", Color = "gold" };
+    private readonly Dictionary<int, int> _cart = new();
+    private static readonly PaymentMethod[] PaymentMethods = { new("Cash", "fa-solid fa-money-bill-wave"), new("Card", "fa-regular fa-credit-card"), new("Tap", "fa-solid fa-wifi") };
+
+    protected override Task OnInitializedAsync() => Reload();
+    private async Task Reload()
+    {
+        _loading = true; _error = null;
+        try { _catalog = await PosService.GetCatalogAsync(ModuleState.ModuleId); _taxPercent = Store.TaxRateBasisPoints / 100m; ResetProduct(); }
+        catch (Exception ex) { _error = ex.Message; await logger.LogError(ex, "Unable to load Beer POS {Error}", ex.Message); }
+        finally { _loading = false; }
+    }
+    private void ToggleManage() { _manage = !_manage; _notice = null; _error = null; if (_manage) { _taxPercent = Store.TaxRateBasisPoints / 100m; ResetProduct(); } }
+    private List<PosProduct> FilteredProducts => _catalog.Products.Where(x => _categoryId == 0 || x.PosCategoryId == _categoryId).Where(x => string.IsNullOrWhiteSpace(_search) || ($"{x.Name} {x.Brewery} {x.Style} {x.Sku}").Contains(_search, StringComparison.OrdinalIgnoreCase)).ToList();
+    private List<PosOrder> FilteredSales => _catalog.RecentOrders.Where(x => _salesStatus == "All" || x.Status == _salesStatus).Where(x => string.IsNullOrWhiteSpace(_salesSearch) || $"{x.OrderNumber} {x.CustomerName} {x.PaymentMethod} {x.Status}".Contains(_salesSearch, StringComparison.OrdinalIgnoreCase)).ToList();
+    private string SalesExportUrl => PosService.GetSalesExportUrl(ModuleState.ModuleId);
+    private List<CartLine> CartLines => _catalog.Products.Where(x => _cart.ContainsKey(x.PosProductId)).Select(x => new CartLine(x, _cart[x.PosProductId])).ToList();
+    private int CartCount => _cart.Values.Sum();
+    private int SubtotalCents => CartLines.Sum(x => x.TotalCents);
+    private int TaxCents => (int)Math.Round(SubtotalCents * (Store.TaxRateBasisPoints / 10000m), MidpointRounding.AwayFromZero);
+    private int TotalCents => SubtotalCents + TaxCents;
+    private string TaxPercentLabel => $"{Store.TaxRateBasisPoints / 100m:0.##}%";
+
+    private void Add(PosProduct product)
+    {
+        if (!Store.IsOpen || SoldOut(product)) return;
+        var next = _cart.GetValueOrDefault(product.PosProductId) + 1;
+        if (product.TrackInventory && next > product.StockQuantity) { _error = $"Only {product.StockQuantity} × {product.Name} remain in stock."; return; }
+        _cart[product.PosProductId] = next; _notice = null; _error = null;
+    }
+    private void Decrease(PosProduct product) { if (!_cart.TryGetValue(product.PosProductId, out var quantity)) return; if (quantity <= 1) _cart.Remove(product.PosProductId); else _cart[product.PosProductId] = quantity - 1; }
+    private void ClearCart() { _cart.Clear(); _notice = null; }
+    private async Task CompleteOrder()
+    {
+        if (CartCount == 0) return; _checkingOut = true; _error = null;
+        try
+        {
+            var receipt = await PosService.CheckoutAsync(new PosCheckoutRequest { ModuleId = ModuleState.ModuleId, PaymentMethod = _paymentMethod, CustomerName = _customerName, Lines = _cart.Select(x => new PosCheckoutLine { ProductId = x.Key, Quantity = x.Value }).ToList() });
+            if (!receipt.Succeeded) { _error = receipt.Message; return; }
+            _lastReceipt = receipt; _notice = $"Order #{receipt.OrderNumber} paid by {receipt.PaymentMethod} — {Money(receipt.TotalCents)}"; _cart.Clear(); _customerName = string.Empty; _customerOpen = false; await Reload();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _checkingOut = false; }
+    }
+    private async Task ViewSale(PosOrder order)
+    {
+        try { var receipt = await PosService.GetReceiptAsync(ModuleState.ModuleId, order.PosOrderId); if (!receipt.Succeeded) _error = receipt.Message; else _lastReceipt = receipt; }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+    private async Task CancelSale(PosOrder order)
+    {
+        try
+        {
+            var result = await PosService.CancelOrderAsync(ModuleState.ModuleId, order.PosOrderId);
+            if (!result.Succeeded) { _error = result.Message; return; }
+            _cancelOrder = null; _notice = result.Message; await Reload(); _manage = true;
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+    private async Task SaveStore() { _saving = true; try { Store.TaxRateBasisPoints = (int)Math.Round(Math.Clamp(_taxPercent, 0, 100) * 100); _catalog.Store = await PosService.SaveStoreAsync(ModuleState.ModuleId, Store); _notice = "Store settings saved."; } catch (Exception ex) { _error = ex.Message; } finally { _saving = false; } }
+    private async Task AddCategory() { if (string.IsNullOrWhiteSpace(_newCategory)) return; try { await PosService.SaveCategoryAsync(ModuleState.ModuleId, new PosCategory { Name = _newCategory, IsActive = true, SortOrder = _catalog.Categories.Count + 1 }); _newCategory = string.Empty; await Reload(); _manage = true; _notice = "Category added."; } catch (Exception ex) { _error = ex.Message; } }
+    private async Task SaveProduct()
+    {
+        _error = null;
+        if (_productDraft.PosCategoryId == 0) _productDraft.PosCategoryId = _catalog.Categories.FirstOrDefault()?.PosCategoryId ?? 0;
+        if (string.IsNullOrWhiteSpace(_productDraft.Name)) { _error = "Product name is required."; return; }
+        _saving = true; try { _productDraft.PriceCents = (int)Math.Round(Math.Max(0, _productPrice) * 100); var saved = await PosService.SaveProductAsync(ModuleState.ModuleId, _productDraft); if (saved == null) { _error = "The product could not be saved."; return; } await Reload(); _manage = true; _notice = "Product saved."; } catch (Exception ex) { _error = ex.Message; } finally { _saving = false; }
+    }
+    private void EditProduct(PosProduct source) { _productDraft = new PosProduct { PosProductId = source.PosProductId, PosStoreId = source.PosStoreId, PosCategoryId = source.PosCategoryId, Name = source.Name, Brewery = source.Brewery, Style = source.Style, Description = source.Description, Abv = source.Abv, PriceCents = source.PriceCents, Format = source.Format, Sku = source.Sku, StockLabel = source.StockLabel, ImageDataUrl = source.ImageDataUrl, Color = source.Color, TrackInventory = source.TrackInventory, StockQuantity = source.StockQuantity, LowStockThreshold = source.LowStockThreshold, IsActive = source.IsActive, SortOrder = source.SortOrder }; _productPrice = source.PriceCents / 100m; }
+    private async Task DeleteProduct(PosProduct product) { try { await PosService.DeleteProductAsync(ModuleState.ModuleId, product.PosProductId); _cart.Remove(product.PosProductId); await Reload(); _manage = true; _notice = $"{product.Name} removed."; } catch (Exception ex) { _error = ex.Message; } }
+    private void ResetProduct() { _productDraft = new PosProduct { PosCategoryId = _catalog?.Categories.FirstOrDefault()?.PosCategoryId ?? 0, IsActive = true, Format = "Pint", Color = "gold", TrackInventory = true, StockQuantity = 0, LowStockThreshold = 5, SortOrder = (_catalog?.Products.Count ?? 0) + 1 }; _productPrice = 0; }
+    private async Task ReadPhoto(InputFileChangeEventArgs args) { try { var file = args.File; await using var stream = file.OpenReadStream(600_000); using var memory = new System.IO.MemoryStream(); await stream.CopyToAsync(memory); _productDraft.ImageDataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(memory.ToArray())}"; } catch (Exception ex) { _error = "Photo could not be read: " + ex.Message; } }
+    private async Task ScanKey(KeyboardEventArgs args) { if (args.Key == "Enter") await FindBarcode(); }
+    private Task FindBarcode() { var product = _catalog.Products.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.Sku) && string.Equals(x.Sku, _barcode.Trim(), StringComparison.OrdinalIgnoreCase)); if (product == null) _error = "No active product matches that SKU."; else { Add(product); _notice = $"{product.Name} added."; _barcode = string.Empty; } return Task.CompletedTask; }
+    private string CategoryName(int id) => _catalog.Categories.FirstOrDefault(x => x.PosCategoryId == id)?.Name ?? "Other";
+    private bool SoldOut(PosProduct product) => product.TrackInventory && product.StockQuantity <= 0;
+    private string StockClass(PosProduct product) => !product.TrackInventory ? "untracked" : product.StockQuantity <= 0 ? "out" : product.StockQuantity <= product.LowStockThreshold ? "low" : "ok";
+    private string Initials(string name) => string.Concat((name ?? "?").Split(' ', StringSplitOptions.RemoveEmptyEntries).Take(2).Select(x => char.ToUpperInvariant(x[0])));
+    private string Money(int cents) => $"{Store?.CurrencySymbol ?? "$"}{cents / 100m:0.00}";
+    private string StoreMoney(PosStoreSummary store) => $"{store.CurrencySymbol}{store.RevenueCents / 100m:0.00}";
+    private string ReceiptMoney(int cents) => $"{_lastReceipt?.CurrencySymbol ?? Store?.CurrencySymbol ?? "$"}{cents / 100m:0.00}";
+    private async Task PrintReceipt() => await JS.InvokeVoidAsync("print");
+    private sealed record CartLine(PosProduct Product, int Quantity) { public int TotalCents => Product.PriceCents * Quantity; }
+    private sealed record PaymentMethod(string Name, string Icon);
+}

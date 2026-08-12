@@ -1,0 +1,11 @@
+@namespace Yosh.uwa.VisualCrud
+@inherits ModuleBase
+
+<div class="alert alert-info mb-0">
+    CRUD definitions are configured from the module's <strong>Design</strong> action. Oqtane module permissions control who may view or edit generated data screens.
+</div>
+
+@code {
+    public override string Title => "Visual CRUD Settings";
+    public Task UpdateSettings() => Task.CompletedTask;
+}

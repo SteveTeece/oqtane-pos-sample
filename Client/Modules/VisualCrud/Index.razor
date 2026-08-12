@@ -1,0 +1,165 @@
+@using Yosh.uwa.Models
+@using Yosh.uwa.Services
+
+@namespace Yosh.uwa.VisualCrud
+@inherits ModuleBase
+@inject IVisualCrudService CrudService
+@inject ISettingService SettingService
+@inject NavigationManager NavigationManager
+
+@if (_generatedDefinitionId > 0)
+{
+    <GeneratedCrud DefinitionId="_generatedDefinitionId" Mode="@_generatedMode" BasePath="@_generatedBasePath" ModuleId="ModuleState.ModuleId" />
+}
+else
+{
+@if (_designerOpen)
+{
+    <Edit Inline="true" DefinitionId="_designerDefinitionId" OnCancel="CloseDesigner" OnSaved="DesignerSaved" />
+}
+else
+{
+<div class="visual-crud">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="mb-0">CRUD Page Generator</h4>
+            <small class="text-muted">Design a schema-driven application and generate its Oqtane pages.</small>
+        </div>
+        <button type="button" class="btn btn-success" @onclick="NewPageSet">New Page Set</button>
+    </div>
+
+    @if (_definitions == null)
+    {
+        <p><em>Loading...</em></p>
+    }
+    else if (_definitions.Count == 0)
+    {
+        <div class="alert alert-info">No page sets have been defined yet. Choose <strong>New Page Set</strong> to select a table, columns, joins, and generated routes.</div>
+    }
+    else
+    {
+        <div class="row g-3">
+            @foreach (var definition in _definitions)
+            {
+                <div class="col-sm-6 col-xl-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center gap-3">
+                                <i class="@(string.IsNullOrWhiteSpace(definition.Icon) ? "fa-solid fa-table" : definition.Icon) fa-2x text-primary"></i>
+                                <div>
+                                    <h5 class="card-title mb-1">@(definition.MenuTitle ?? definition.Name)</h5>
+                                    <div class="small text-muted">@definition.SourceSchema.@definition.SourceTable</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer bg-transparent d-flex gap-2">
+                            @foreach (var generatedPage in Configuration(definition).GeneratedPages)
+                            {
+                                @if (generatedPage.Role == "List")
+                                {
+                                    <NavLink href="@(generatedPage.Path)" class="btn btn-primary btn-sm">Open pages</NavLink>
+                                }
+                            }
+                            <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="(() => Design(definition.CrudDefinitionId))">Design</button>
+                            <ActionDialog Header="Delete CRUD" Message="Delete this CRUD definition? The source table and its data will not be deleted." Action="Delete" Security="SecurityAccessLevel.Edit" Class="btn btn-outline-danger btn-sm" OnClick="@(async () => await Delete(definition))" Text="Delete" Id="@definition.CrudDefinitionId.ToString()" />
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+}
+}
+
+@code {
+    public override List<Resource> Resources => new()
+    {
+        new Stylesheet(ModulePath() + "Module.css")
+    };
+
+    private List<CrudDefinition> _definitions;
+    private int _generatedDefinitionId;
+    private string _generatedMode;
+    private string _generatedBasePath;
+    private bool _designerOpen;
+    private int? _designerDefinitionId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var settings = await SettingService.GetModuleSettingsAsync(ModuleState.ModuleId);
+            int.TryParse(SettingService.GetSetting(settings, CrudPageGenerator.DefinitionIdSetting, "0"), out _generatedDefinitionId);
+            _generatedMode = SettingService.GetSetting(settings, CrudPageGenerator.ModeSetting, "List");
+            _generatedBasePath = SettingService.GetSetting(settings, CrudPageGenerator.BasePathSetting, string.Empty);
+            if (_generatedDefinitionId > 0) return;
+            _definitions = await CrudService.GetDefinitionsAsync(ModuleState.ModuleId);
+            ReadDesignerQuery();
+        }
+        catch (Exception ex)
+        {
+            await logger.LogError(ex, "Error loading Visual CRUD definitions {Error}", ex.Message);
+            AddModuleMessage(ex.Message, MessageType.Error);
+        }
+    }
+
+    private void NewPageSet()
+    {
+        _designerDefinitionId = null;
+        _designerOpen = true;
+        NavigationManager.NavigateTo(BuilderUrl("new"), false, true);
+    }
+
+    private void Design(int definitionId)
+    {
+        _designerDefinitionId = definitionId;
+        _designerOpen = true;
+        NavigationManager.NavigateTo(BuilderUrl(definitionId.ToString()), false, true);
+    }
+
+    private void CloseDesigner()
+    {
+        _designerOpen = false;
+        _designerDefinitionId = null;
+        NavigationManager.NavigateTo("/" + (PageState.Page.Path ?? string.Empty).Trim('/'), false, true);
+    }
+
+    private async Task DesignerSaved()
+    {
+        _definitions = await CrudService.GetDefinitionsAsync(ModuleState.ModuleId);
+        CloseDesigner();
+    }
+
+    private void ReadDesignerQuery()
+    {
+        var query = new Uri(NavigationManager.Uri).Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var pair in query)
+        {
+            var parts = pair.Split('=', 2);
+            if (!string.Equals(Uri.UnescapeDataString(parts[0]), "crudbuilder", StringComparison.OrdinalIgnoreCase)) continue;
+            var value = parts.Length == 2 ? Uri.UnescapeDataString(parts[1]) : string.Empty;
+            var segments = value.Split(':', 2);
+            if (segments.Length != 2 || !int.TryParse(segments[0], out var moduleId) || moduleId != ModuleState.ModuleId) continue;
+            _designerOpen = true;
+            _designerDefinitionId = int.TryParse(segments[1], out var id) ? id : null;
+        }
+    }
+
+    private string BuilderUrl(string value)
+    {
+        var path = "/" + (PageState.Page.Path ?? string.Empty).Trim('/');
+        return $"{path}?crudbuilder={ModuleState.ModuleId}:{Uri.EscapeDataString(value)}";
+    }
+
+    private static CrudBuilderConfiguration Configuration(CrudDefinition definition)
+        => string.IsNullOrWhiteSpace(definition.ConfigurationJson)
+            ? new CrudBuilderConfiguration()
+            : System.Text.Json.JsonSerializer.Deserialize<CrudBuilderConfiguration>(definition.ConfigurationJson) ?? new();
+
+    private async Task Delete(CrudDefinition definition)
+    {
+        await CrudService.DeleteDefinitionAsync(definition.CrudDefinitionId, ModuleState.ModuleId);
+        _definitions = await CrudService.GetDefinitionsAsync(ModuleState.ModuleId);
+    }
+}

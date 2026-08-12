@@ -1,0 +1,447 @@
+@using System.Text.Json
+@using Yosh.uwa.Models
+@using Yosh.uwa.Services
+
+@namespace Yosh.uwa.VisualCrud
+@inherits ModuleBase
+@inject IVisualCrudService CrudService
+@inject ICrudPageGenerator PageGenerator
+@inject NavigationManager NavigationManager
+
+<div class="visual-crud-builder">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="mb-0">@Title</h4>
+            <small class="text-muted">Define the schema and requirements, then generate a complete Oqtane page set.</small>
+        </div>
+        <span class="badge bg-secondary">SQL Server / LocalDB</span>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <div class="alert @_messageCss" role="alert">@_message</div>
+    }
+
+    @if (_loading)
+    {
+        <p><em>Loading database schema...</em></p>
+    }
+    else
+    {
+        <div class="card mb-3">
+            <div class="card-header">Application</div>
+            <div class="card-body row g-3">
+                <div class="col-md-6">
+                    <label class="form-label" for="definition-name">Definition name</label>
+                    <input id="definition-name" class="form-control" @bind="_definition.Name" @bind:event="oninput" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="menu-title">Menu item name</label>
+                    <input id="menu-title" class="form-control" @bind="_definition.MenuTitle" @bind:event="oninput" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="icon">Icon CSS class</label>
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="@(string.IsNullOrWhiteSpace(_definition.Icon) ? "fa-solid fa-table" : _definition.Icon)"></i></span>
+                        <input id="icon" class="form-control" placeholder="fa-solid fa-address-book" @bind="_definition.Icon" />
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="rule-key">Business rule key</label>
+                    <input id="rule-key" class="form-control" placeholder="default" @bind="_configuration.BusinessRuleKey" />
+                    <div class="form-text">Matches an <code>ICrudBusinessRule.Key</code> registered with dependency injection.</div>
+                </div>
+                <div class="col-12 form-check ms-2">
+                    <input id="published" class="form-check-input" type="checkbox" @bind="_definition.IsPublished" />
+                    <label class="form-check-label" for="published">Published</label>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header">Base table</div>
+            <div class="card-body row g-3">
+                <div class="col-md-8">
+                    <label class="form-label" for="source-table">Table</label>
+                    <select id="source-table" class="form-select" value="@SourceTableValue" @onchange="SourceTableChanged">
+                        <option value="">Select a table...</option>
+                        @foreach (var table in _tables)
+                        {
+                            <option value="@TableValue(table.Schema, table.Name)">@table.DisplayName</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="primary-key">Primary key</label>
+                    <select id="primary-key" class="form-select" @bind="_definition.PrimaryKeyColumn">
+                        <option value="">Select...</option>
+                        @foreach (var column in BaseColumns.Where(column => column.IsPrimaryKey))
+                        {
+                            <option value="@column.Name">@column.Name</option>
+                        }
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        @if (BaseColumns.Count > 0)
+        {
+            <div class="card mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>Columns</span>
+                    <small class="text-muted">Joined-table columns are display-only.</small>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead><tr><th>Show</th><th>Source</th><th>Label</th><th>Type</th><th>Edit</th><th>Required</th></tr></thead>
+                        <tbody>
+                            @foreach (var metadata in _availableColumns.OrderBy(column => column.Table == _definition.SourceTable ? 0 : 1).ThenBy(column => column.Ordinal))
+                            {
+                                var column = ConfigColumn(metadata);
+                                var isBase = metadata.Schema == _definition.SourceSchema && metadata.Table == _definition.SourceTable;
+                                var isKey = isBase && metadata.Name == _definition.PrimaryKeyColumn;
+                                <tr>
+                                    <td><input type="checkbox" class="form-check-input" @bind="column.IsVisible" disabled="@isKey" /></td>
+                                    <td><code>@metadata.Table.@metadata.Name</code></td>
+                                    <td><input class="form-control form-control-sm" @bind="column.Label" /></td>
+                                    <td><span class="badge bg-light text-dark">@metadata.DataType</span></td>
+                                    <td><input type="checkbox" class="form-check-input" @bind="column.IsEditable" disabled="@(!isBase || metadata.IsIdentity || metadata.IsPrimaryKey)" /></td>
+                                    <td><input type="checkbox" class="form-check-input" @bind="column.IsRequired" disabled="@(!isBase || metadata.IsNullable || metadata.IsIdentity)" /></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>Joins</span>
+                    <button type="button" class="btn btn-outline-primary btn-sm" @onclick="AddJoin">Add join</button>
+                </div>
+                <div class="card-body">
+                    @if (_configuration.Joins.Count == 0)
+                    {
+                        <div class="text-muted">No joins configured.</div>
+                    }
+                    @foreach (var join in _configuration.Joins.ToList())
+                    {
+                        <div class="row g-2 align-items-end border rounded p-2 mb-2">
+                            <div class="col-md-2">
+                                <label class="form-label">Type</label>
+                                <select class="form-select" @bind="join.JoinType"><option value="LEFT">LEFT</option><option value="INNER">INNER</option></select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">Table</label>
+                                <select class="form-select" value="@TableValue(join.Schema, join.Table)" @onchange="@(args => JoinTableChanged(join, args))">
+                                    <option value="">Select...</option>
+                                    @foreach (var table in _tables.Where(table => table.Schema != _definition.SourceSchema || table.Name != _definition.SourceTable))
+                                    {
+                                        <option value="@TableValue(table.Schema, table.Name)">@table.DisplayName</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">Base column</label>
+                                <select class="form-select" @bind="join.LeftColumn">
+                                    <option value="">Select...</option>
+                                    @foreach (var column in BaseColumns)
+                                    {
+                                        <option value="@column.Name">@column.Name</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">Joined column</label>
+                                <select class="form-select" @bind="join.RightColumn">
+                                    <option value="">Select...</option>
+                                    @foreach (var column in ColumnsFor(join.Schema, join.Table))
+                                    {
+                                        <option value="@column.Name">@column.Name</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-1">
+                                <button type="button" class="btn btn-outline-danger" title="Remove join" @onclick="(() => RemoveJoin(join))"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        <div class="card mb-3">
+            <div class="card-header">Generated Oqtane pages</div>
+            <div class="card-body row g-3">
+                <div class="col-md-8">
+                    <label class="form-label" for="base-path">Base route</label>
+                    <div class="input-group"><span class="input-group-text">/</span><input id="base-path" class="form-control" placeholder="customers" @bind="_configuration.PageSet.BasePath" /></div>
+                    <div class="form-text">The list page is added to navigation using the menu name and icon above.</div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="pane">Module pane</label>
+                    <input id="pane" class="form-control" placeholder="Default" @bind="_configuration.PageSet.Pane" />
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-4">
+                    <div class="form-check"><input id="page-create" class="form-check-input" type="checkbox" @bind="_configuration.PageSet.GenerateCreate" /><label class="form-check-label" for="page-create">Create page</label></div>
+                    <div class="form-check"><input id="page-edit" class="form-check-input" type="checkbox" @bind="_configuration.PageSet.GenerateEdit" /><label class="form-check-label" for="page-edit">Edit page</label></div>
+                    <div class="form-check"><input id="page-details" class="form-check-input" type="checkbox" @bind="_configuration.PageSet.GenerateDetails" /><label class="form-check-label" for="page-details">Details page</label></div>
+                </div>
+                <div class="col-12">
+                    <div class="border rounded p-3 bg-light">
+                        <div class="fw-semibold mb-2">Page preview</div>
+                        <div><i class="fa-solid fa-list me-2"></i>/@PreviewBase <span class="badge bg-primary ms-1">Navigation</span></div>
+                        @if (_configuration.PageSet.GenerateCreate) { <div class="ms-4 text-muted">/@PreviewBase/new</div> }
+                        @if (_configuration.PageSet.GenerateEdit) { <div class="ms-4 text-muted">/@PreviewBase/edit?id=…</div> }
+                        @if (_configuration.PageSet.GenerateDetails) { <div class="ms-4 text-muted">/@PreviewBase/details?id=…</div> }
+                    </div>
+                </div>
+                @if (_configuration.GeneratedPages.Count > 0)
+                {
+                    <div class="col-12"><small class="text-success"><i class="fa-solid fa-circle-check me-1"></i>@_configuration.GeneratedPages.Count pages currently generated. Generate again to update them without duplicates.</small></div>
+                }
+            </div>
+        </div>
+
+        <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-primary" disabled="@_saving" @onclick="SaveOnly">Save design</button>
+            <button type="button" class="btn btn-success" disabled="@_saving" @onclick="SaveAndGenerate"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>@(_configuration.GeneratedPages.Count == 0 ? "Generate Pages" : "Regenerate Pages")</button>
+            @if (Inline)
+            {
+                <button type="button" class="btn btn-secondary" @onclick="CancelInline">Cancel</button>
+            }
+            else
+            {
+                <NavLink class="btn btn-secondary" href="@NavigateUrl()">Cancel</NavLink>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    public override SecurityAccessLevel SecurityAccessLevel => SecurityAccessLevel.Edit;
+    public override string Actions => "Add,Edit";
+    public override string Title => IsEditing ? "Design Visual CRUD" : "Create Visual CRUD";
+    public override List<Resource> Resources => new() { new Stylesheet(ModulePath() + "Module.css") };
+
+    [Parameter] public bool Inline { get; set; }
+    [Parameter] public int? DefinitionId { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+    [Parameter] public EventCallback OnSaved { get; set; }
+
+    private bool _loading = true;
+    private bool _saving;
+    private string _message;
+    private string _messageCss = "alert-warning";
+    private CrudDefinition _definition = new() { Icon = "fa-solid fa-table", IsPublished = true };
+    private CrudBuilderConfiguration _configuration = new();
+    private List<DatabaseTableInfo> _tables = new();
+    private List<DatabaseColumnInfo> _availableColumns = new();
+    private List<DatabaseColumnInfo> BaseColumns => ColumnsFor(_definition.SourceSchema, _definition.SourceTable);
+    private string SourceTableValue => TableValue(_definition.SourceSchema, _definition.SourceTable);
+    private string PreviewBase => CrudPageGenerator.NormalizePath(_configuration.PageSet.BasePath, _definition.MenuTitle ?? _definition.Name);
+    private bool IsEditing => DefinitionId.HasValue || PageState.Action == "Edit";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _tables = await CrudService.GetTablesAsync(ModuleState.ModuleId);
+            if (IsEditing)
+            {
+                var id = DefinitionId ?? int.Parse(PageState.QueryString["id"]);
+                _definition = await CrudService.GetDefinitionAsync(id, ModuleState.ModuleId);
+                _configuration = string.IsNullOrWhiteSpace(_definition.ConfigurationJson)
+                    ? new CrudBuilderConfiguration()
+                    : JsonSerializer.Deserialize<CrudBuilderConfiguration>(_definition.ConfigurationJson) ?? new();
+                await LoadColumns(_definition.SourceSchema, _definition.SourceTable, true);
+                foreach (var join in _configuration.Joins)
+                {
+                    await LoadColumns(join.Schema, join.Table, false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, MessageType.Error);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SourceTableChanged(ChangeEventArgs args)
+    {
+        ParseTable(Convert.ToString(args.Value), out var schema, out var table);
+        _definition.SourceSchema = schema;
+        _definition.SourceTable = table;
+        _definition.PrimaryKeyColumn = null;
+        _configuration.Columns.Clear();
+        _configuration.Joins.Clear();
+        _availableColumns.Clear();
+        if (!string.IsNullOrWhiteSpace(table))
+        {
+            await LoadColumns(schema, table, true);
+            var primaryKey = BaseColumns.FirstOrDefault(column => column.IsPrimaryKey);
+            _definition.PrimaryKeyColumn = primaryKey?.Name;
+            if (primaryKey != null) ConfigColumn(primaryKey).IsVisible = true;
+        }
+    }
+
+    private void AddJoin() => _configuration.Joins.Add(new CrudJoinDefinition());
+
+    private async Task JoinTableChanged(CrudJoinDefinition join, ChangeEventArgs args)
+    {
+        ParseTable(Convert.ToString(args.Value), out var schema, out var table);
+        join.Schema = schema;
+        join.Table = table;
+        join.RightColumn = null;
+        if (!string.IsNullOrWhiteSpace(table)) await LoadColumns(schema, table, false);
+    }
+
+    private void RemoveJoin(CrudJoinDefinition join)
+    {
+        _configuration.Joins.Remove(join);
+        _availableColumns.RemoveAll(column => column.Schema == join.Schema && column.Table == join.Table);
+        _configuration.Columns.RemoveAll(column => column.Schema == join.Schema && column.Table == join.Table);
+    }
+
+    private async Task LoadColumns(string schema, string table, bool selectByDefault)
+    {
+        if (string.IsNullOrWhiteSpace(schema) || string.IsNullOrWhiteSpace(table)) return;
+        var columns = await CrudService.GetColumnsAsync(ModuleState.ModuleId, schema, table);
+        foreach (var metadata in columns)
+        {
+            if (!_availableColumns.Any(item => item.Schema == schema && item.Table == table && item.Name == metadata.Name))
+                _availableColumns.Add(metadata);
+            if (!_configuration.Columns.Any(item => item.Schema == schema && item.Table == table && item.Column == metadata.Name))
+            {
+                _configuration.Columns.Add(new CrudColumnDefinition
+                {
+                    Schema = schema,
+                    Table = table,
+                    Column = metadata.Name,
+                    Label = SplitName(metadata.Name),
+                    IsVisible = selectByDefault,
+                    IsEditable = selectByDefault && !metadata.IsIdentity && !metadata.IsPrimaryKey,
+                    IsRequired = selectByDefault && !metadata.IsNullable && !metadata.IsIdentity,
+                    SortOrder = _configuration.Columns.Count
+                });
+            }
+        }
+    }
+
+    private CrudColumnDefinition ConfigColumn(DatabaseColumnInfo metadata)
+        => _configuration.Columns.First(column => column.Schema == metadata.Schema && column.Table == metadata.Table && column.Column == metadata.Name);
+
+    private List<DatabaseColumnInfo> ColumnsFor(string schema, string table)
+        => _availableColumns.Where(column => column.Schema == schema && column.Table == table).OrderBy(column => column.Ordinal).ToList();
+
+    private async Task SaveOnly()
+    {
+        if (!await SaveDefinition()) return;
+        if (Inline) await OnSaved.InvokeAsync();
+        else NavigationManager.NavigateTo(NavigateUrl());
+    }
+
+    private Task CancelInline() => OnCancel.InvokeAsync();
+
+    private async Task SaveAndGenerate()
+    {
+        if (!await SaveDefinition()) return;
+        try
+        {
+            var result = await PageGenerator.GenerateAsync(_definition, ModuleState.ModuleId, PageState.Page.PageId);
+            if (!result.Succeeded) { ShowMessage(result.Message, MessageType.Warning); return; }
+            NavigationManager.NavigateTo(result.ListPath, true);
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, MessageType.Error);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task<bool> SaveDefinition()
+    {
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(_definition.Name)) missing.Add("definition name");
+        if (string.IsNullOrWhiteSpace(_definition.SourceTable)) missing.Add("source table");
+        if (string.IsNullOrWhiteSpace(_definition.PrimaryKeyColumn)) missing.Add("primary key");
+        if (missing.Count > 0)
+        {
+            ShowMessage($"Complete the following required fields: {string.Join(", ", missing)}.", MessageType.Warning);
+            return false;
+        }
+        if (_configuration.Joins.Any(join => string.IsNullOrWhiteSpace(join.Table) || string.IsNullOrWhiteSpace(join.LeftColumn) || string.IsNullOrWhiteSpace(join.RightColumn)))
+        {
+            ShowMessage("Every join must specify a table and both join columns.", MessageType.Warning);
+            return false;
+        }
+
+        var allowedTables = _configuration.Joins.Select(join => (join.Schema, join.Table)).Append((_definition.SourceSchema, _definition.SourceTable)).ToHashSet();
+        _configuration.Columns = _configuration.Columns.Where(column => allowedTables.Contains((column.Schema, column.Table))).ToList();
+        var keyColumn = _configuration.Columns.First(column => column.Schema == _definition.SourceSchema && column.Table == _definition.SourceTable && column.Column == _definition.PrimaryKeyColumn);
+        keyColumn.IsVisible = true;
+        keyColumn.IsEditable = false;
+        _definition.ModuleId = ModuleState.ModuleId;
+        _definition.MenuTitle = string.IsNullOrWhiteSpace(_definition.MenuTitle) ? _definition.Name : _definition.MenuTitle;
+        _configuration.PageSet ??= new CrudPageSetRequirements();
+        _configuration.PageSet.BasePath = CrudPageGenerator.NormalizePath(_configuration.PageSet.BasePath, _definition.MenuTitle);
+        _configuration.PageSet.Pane = string.IsNullOrWhiteSpace(_configuration.PageSet.Pane) ? "Default" : _configuration.PageSet.Pane;
+        _definition.ConfigurationJson = JsonSerializer.Serialize(_configuration);
+        _saving = true;
+        try
+        {
+            var saved = _definition.CrudDefinitionId == 0
+                ? await CrudService.AddDefinitionAsync(_definition)
+                : await CrudService.UpdateDefinitionAsync(_definition);
+            if (saved == null)
+            {
+                ShowMessage("The server did not save the CRUD definition. Verify that this module grants Edit permission and try again.", MessageType.Error);
+                return false;
+            }
+            _definition = saved;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, MessageType.Error);
+            return false;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private static string TableValue(string schema, string table) => string.IsNullOrWhiteSpace(table) ? string.Empty : $"{schema}|{table}";
+
+    private void ShowMessage(string message, MessageType type)
+    {
+        _message = message;
+        _messageCss = type == MessageType.Error ? "alert-danger" : type == MessageType.Success ? "alert-success" : "alert-warning";
+    }
+    private static void ParseTable(string value, out string schema, out string table)
+    {
+        var parts = (value ?? string.Empty).Split('|', 2);
+        schema = parts.Length == 2 ? parts[0] : null;
+        table = parts.Length == 2 ? parts[1] : null;
+    }
+
+    private static string SplitName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        var result = new System.Text.StringBuilder(value.Length + 4);
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (index > 0 && char.IsUpper(value[index]) && !char.IsUpper(value[index - 1])) result.Append(' ');
+            result.Append(value[index]);
+        }
+        return result.ToString();
+    }
+}

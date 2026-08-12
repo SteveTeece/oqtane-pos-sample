@@ -1,0 +1,172 @@
+@using Yosh.uwa.Models
+@using Yosh.uwa.Services
+
+@namespace Yosh.uwa.VisualCrud
+@inject IVisualCrudService CrudService
+@inject NavigationManager NavigationManager
+
+@if (_definition == null || _data == null)
+{
+    <p><em>Loading generated CRUD page...</em></p>
+}
+else
+{
+    <div class="visual-crud-runtime">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="d-flex align-items-center gap-2">
+                <i class="@(string.IsNullOrWhiteSpace(_definition.Icon) ? "fa-solid fa-table" : _definition.Icon) fa-xl text-primary"></i>
+                <div>
+                    <h4 class="mb-0">@Heading</h4>
+                    <small class="text-muted">@_definition.SourceSchema.@_definition.SourceTable</small>
+                </div>
+            </div>
+            @if (IsList && _configuration.PageSet.GenerateCreate)
+            {
+                <NavLink href="@Route("new")" class="btn btn-success"><i class="fa-solid fa-plus me-1"></i>New</NavLink>
+            }
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <div class="alert @(_success ? "alert-success" : "alert-warning")">@_message</div>
+        }
+
+        @if (IsList)
+        {
+            <div class="table-responsive border rounded">
+                <table class="table table-striped table-hover table-sm align-middle mb-0">
+                    <thead><tr><th style="width:1%">Actions</th>@foreach (var column in _data.Columns) { <th>@Label(column)</th> }</tr></thead>
+                    <tbody>
+                        @if (_data.Rows.Count == 0)
+                        {
+                            <tr><td colspan="@(_data.Columns.Count + 1)" class="text-center text-muted p-4">No rows found.</td></tr>
+                        }
+                        @foreach (var row in _data.Rows)
+                        {
+                            var key = Key(row);
+                            <tr>
+                                <td class="text-nowrap">
+                                    @if (_configuration.PageSet.GenerateDetails) { <NavLink href="@Route($"details?id={Uri.EscapeDataString(key)}")" class="btn btn-outline-secondary btn-sm me-1" title="Details"><i class="fa-solid fa-eye"></i></NavLink> }
+                                    @if (_configuration.PageSet.GenerateEdit) { <NavLink href="@Route($"edit?id={Uri.EscapeDataString(key)}")" class="btn btn-outline-primary btn-sm me-1" title="Edit"><i class="fa-solid fa-pen"></i></NavLink> }
+                                    <button type="button" class="btn btn-outline-danger btn-sm" title="Delete" @onclick="(() => DeleteRow(key))"><i class="fa-solid fa-trash"></i></button>
+                                </td>
+                                @foreach (var column in _data.Columns) { <td>@Cell(row, column.DataKey)</td> }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else if (IsDetails)
+        {
+            @if (_row == null)
+            {
+                <div class="alert alert-warning">The requested record was not found.</div>
+            }
+            else
+            {
+                <dl class="row border rounded p-3">
+                    @foreach (var column in _data.Columns)
+                    {
+                        <dt class="col-sm-4">@Label(column)</dt><dd class="col-sm-8">@Cell(_row, column.DataKey)</dd>
+                    }
+                </dl>
+            }
+            <NavLink href="@Route()" class="btn btn-secondary">Back to list</NavLink>
+        }
+        else
+        {
+            <div class="card">
+                <div class="card-body row g-3">
+                    @foreach (var column in EditableColumns)
+                    {
+                        <div class="col-md-6">
+                            <label class="form-label">@Label(column) @if (column.IsRequired) { <span class="text-danger">*</span> }</label>
+                            <input class="form-control" value="@Value(column.Column)" @oninput="@(args => _values[column.Column] = Convert.ToString(args.Value))" />
+                        </div>
+                    }
+                </div>
+                <div class="card-footer d-flex gap-2">
+                    <button type="button" class="btn btn-success" @onclick="SaveRow">Save</button>
+                    <NavLink href="@Route()" class="btn btn-secondary">Cancel</NavLink>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public int DefinitionId { get; set; }
+    [Parameter] public int ModuleId { get; set; }
+    [Parameter] public string Mode { get; set; }
+    [Parameter] public string BasePath { get; set; }
+
+    private CrudDefinition _definition;
+    private CrudBuilderConfiguration _configuration = new();
+    private CrudDataResult _data;
+    private Dictionary<string, string> _row;
+    private Dictionary<string, string> _values = new(StringComparer.OrdinalIgnoreCase);
+    private string _key;
+    private string _message;
+    private bool _success;
+    private bool IsList => string.Equals(Mode, "List", StringComparison.OrdinalIgnoreCase);
+    private bool IsDetails => string.Equals(Mode, "Details", StringComparison.OrdinalIgnoreCase);
+    private bool IsCreate => string.Equals(Mode, "Create", StringComparison.OrdinalIgnoreCase);
+    private string Heading => IsCreate ? $"New {_definition.MenuTitle}" : string.Equals(Mode, "Edit", StringComparison.OrdinalIgnoreCase) ? $"Edit {_definition.MenuTitle}" : IsDetails ? $"{_definition.MenuTitle} Details" : _definition.MenuTitle ?? _definition.Name;
+    private List<CrudColumnDefinition> EditableColumns => _data.Columns.Where(column => column.IsEditable && column.Schema == _definition.SourceSchema && column.Table == _definition.SourceTable).ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _definition = await CrudService.GetDefinitionAsync(DefinitionId, ModuleId);
+            _configuration = string.IsNullOrWhiteSpace(_definition.ConfigurationJson)
+                ? new CrudBuilderConfiguration()
+                : System.Text.Json.JsonSerializer.Deserialize<CrudBuilderConfiguration>(_definition.ConfigurationJson) ?? new();
+            _data = await CrudService.GetDataAsync(DefinitionId, ModuleId);
+            _key = QueryValue("id");
+            if (!IsList && !IsCreate)
+            {
+                _row = _data.Rows.FirstOrDefault(row => string.Equals(Key(row), _key, StringComparison.OrdinalIgnoreCase));
+            }
+            _values = EditableColumns.ToDictionary(column => column.Column, column => _row == null ? string.Empty : Cell(_row, column.DataKey), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            _message = ex.Message;
+        }
+    }
+
+    private async Task SaveRow()
+    {
+        var request = Request(IsCreate ? null : _key, _values);
+        var result = IsCreate ? await CrudService.InsertAsync(request) : await CrudService.UpdateDataAsync(request);
+        if (!result.Succeeded) { _message = result.Message; return; }
+        NavigationManager.NavigateTo(Route());
+    }
+
+    private async Task DeleteRow(string key)
+    {
+        var result = await CrudService.DeleteDataAsync(Request(key, new()));
+        _message = result.Message;
+        _success = result.Succeeded;
+        if (result.Succeeded) _data = await CrudService.GetDataAsync(DefinitionId, ModuleId);
+    }
+
+    private CrudDataRequest Request(string key, Dictionary<string, string> values) => new() { ModuleId = ModuleId, DefinitionId = DefinitionId, KeyValue = key, Values = values };
+    private string Route(string suffix = "") => "/" + BasePath.Trim('/') + (string.IsNullOrWhiteSpace(suffix) ? string.Empty : "/" + suffix);
+    private string QueryValue(string name)
+    {
+        var query = new Uri(NavigationManager.Uri).Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var pair in query)
+        {
+            var parts = pair.Split('=', 2);
+            if (parts.Length > 0 && string.Equals(Uri.UnescapeDataString(parts[0]), name, StringComparison.OrdinalIgnoreCase)) return parts.Length == 2 ? Uri.UnescapeDataString(parts[1]) : string.Empty;
+        }
+        return null;
+    }
+    private string Key(Dictionary<string, string> row) => Cell(row, $"{_definition.SourceTable}.{_definition.PrimaryKeyColumn}");
+    private string Value(string column) => _values.TryGetValue(column, out var value) ? value : string.Empty;
+    private static string Label(CrudColumnDefinition column) => column.Label ?? column.Column;
+    private static string Cell(Dictionary<string, string> row, string key) => row.TryGetValue(key, out var value) ? value ?? string.Empty : string.Empty;
+}

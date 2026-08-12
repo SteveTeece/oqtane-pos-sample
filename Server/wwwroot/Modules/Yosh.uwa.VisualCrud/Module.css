@@ -1,0 +1,17 @@
+/* Module Custom Styles */
+/* Visual CRUD Builder */
+.visual-crud .card,
+.visual-crud-builder .card,
+.visual-crud-runtime .card {
+    border-radius: .6rem;
+}
+
+.visual-crud-builder code,
+.visual-crud-runtime code {
+    color: var(--bs-primary);
+}
+
+.visual-crud-runtime td,
+.visual-crud-runtime th {
+    white-space: nowrap;
+}
